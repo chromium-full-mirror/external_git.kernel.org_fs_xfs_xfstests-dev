@@ -1,0 +1,84 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 SUSE S.A.  All Rights Reserved.
+#
+# FS QA Test 362
+#
+# Test an incremental send scenario where we punched a hole into a tail section
+# of a file extent item that is the last item in a leaf and the next leaf in the
+# subvolume tree was not changed (remains shared between the parent and send
+# snapshots).
+#
+. ./common/preamble
+_begin_fstest auto quick send
+
+_cleanup()
+{
+	cd /
+	rm -fr $tmp.*
+	rm -fr $send_files_dir
+}
+
+. ./common/filter
+
+_require_test
+_require_scratch
+_require_btrfs_support_sectorsize 4096
+_require_xfs_io_command "fpunch"
+
+_fixed_by_kernel_commit xxxxxxxxxx \
+	"btrfs: send: fix missing hole punching during incremental send"
+
+send_files_dir=$TEST_DIR/btrfs-test-$seq
+
+rm -fr $send_files_dir
+mkdir $send_files_dir
+
+first_stream="$send_files_dir/1.send"
+second_stream="$send_files_dir/2.send"
+
+# We need a very specific leaf layout where we punch a hole in the last file
+# extent item of a leaf and the next leaf was not modified in the send snapshot,
+# so we set a fixed size of 16K.
+_scratch_mkfs -n 16K >> $seqres.full 2>&1 || _fail "first mkfs failed"
+_scratch_mount
+
+touch $SCRATCH_MNT/foo
+# 205 extents of 64K each with a 64K hole between them.
+for ((i = 0; i < 410; i += 2)); do
+	offset=$((i * 64 * 1024))
+	$XFS_IO_PROG -c "pwrite -b 64K -S 0xab $offset 64K" \
+		$SCRATCH_MNT/foo > /dev/null
+done
+
+_btrfs subvolume snapshot -r $SCRATCH_MNT $SCRATCH_MNT/snap1
+
+# Punch a hole in the last 16K of the last file extent item of the first leaf,
+# which starts at file offset 12845056, so 12845056 + 64K - 16K = 12894208.
+# This does not cause any change in the second leaf of the fs tree, so it will
+# be shared between the snapshots.
+$XFS_IO_PROG -c "fpunch 12894208 16K" $SCRATCH_MNT/foo
+
+_btrfs subvolume snapshot -r $SCRATCH_MNT $SCRATCH_MNT/snap2
+
+echo "File digest in the original fs: $(_md5_checksum $SCRATCH_MNT/snap2/foo)"
+
+_btrfs send -f $first_stream $SCRATCH_MNT/snap1
+_btrfs send -f $second_stream -p $SCRATCH_MNT/snap1 $SCRATCH_MNT/snap2
+
+# Create a new fs and apply both send streams.
+_scratch_unmount
+_scratch_mkfs >> $seqres.full 2>&1 || _fail "second mkfs failed"
+_scratch_mount
+
+_btrfs receive -f $first_stream $SCRATCH_MNT
+_btrfs receive -f $second_stream $SCRATCH_MNT
+
+echo "File digest in the new fs:      $(_md5_checksum $SCRATCH_MNT/snap2/foo)"
+
+# Check the region we punched a hole is full of zeroes.
+echo "Hole data:"
+_hexdump -j 12894208 -N $((16 * 1024)) $SCRATCH_MNT/snap2/foo
+
+# success, all done
+_exit 0
