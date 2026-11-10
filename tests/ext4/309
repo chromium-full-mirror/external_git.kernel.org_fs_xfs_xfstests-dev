@@ -1,0 +1,75 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 Sahaj Chaudhari.  All Rights Reserved.
+#
+# FS QA Test No. 309
+#
+# Verify that the ext4 reserved GID can allocate blocks after ordinary
+# free space is exhausted.
+#
+. ./common/preamble
+_begin_fstest auto enospc quick
+
+_exclude_fs ext2
+_exclude_fs ext3
+_exclude_scratch_mount_option "resuid=" "resgid=" "data=" \
+	"data_err=abort" "commit=" "journal_async_commit" "journal_checksum"
+
+_fixed_by_kernel_commit c87abbab6147 \
+	"ext4: fix incorrect function call when initializing s_resgid"
+
+_require_scratch
+_require_command "$TUNE2FS_PROG" tune2fs
+_require_xfs_io_command "falloc"
+_require_user
+_require_group
+RES_GROUP=$qa_group
+_require_group fsgqa2
+FILL_GROUP=fsgqa2
+SU_PROG=$(command -v su) || _notrun "su utility required"
+"$SU_PROG" -s /bin/bash -g "$FILL_GROUP" -G "$FILL_GROUP" "$qa_user" \
+	-c true >/dev/null 2>&1 ||
+	_notrun "su with -g and -G support required"
+
+echo "Silence is golden"
+
+RESGID=$(_cat_group | awk -F: -v group="$RES_GROUP" \
+	'$1 == group { print $3 }')
+FILLGID=$(_cat_group | awk -F: -v group="$FILL_GROUP" \
+	'$1 == group { print $3 }')
+[ "$RESGID" != "$FILLGID" ] || _notrun "reserved and fill groups are identical"
+[ "$(id -u "$qa_user")" -ne 0 ] || _notrun "test user is root"
+TEST_FILE="$SCRATCH_MNT/ext4_resgid.fill"
+
+MKFS_OPTIONS="-m 10 -N 1024 -O ^has_journal" \
+	_scratch_mkfs_sized $((16 * 1024 * 1024)) 4096 >>"$seqres".full 2>&1
+"$TUNE2FS_PROG" -u 0 -g "$RESGID" "$SCRATCH_DEV" >>"$seqres".full 2>&1 ||
+	_fail "could not set scratch filesystem reserved GID"
+_scratch_mount
+
+touch "$TEST_FILE"
+chmod 0666 "$TEST_FILE"
+
+FILL_OUTPUT=$("$SU_PROG" -s /bin/bash -g "$FILL_GROUP" -G "$FILL_GROUP" \
+	"$qa_user" -c "$XFS_IO_PROG -f -c 'pwrite 0 16M' '$TEST_FILE'" 2>&1)
+FILL_STATUS=$?
+printf '%s\n' "$FILL_OUTPUT" >>"$seqres".full
+printf '%s\n' "$FILL_OUTPUT" | grep -q "pwrite: No space left on device" ||
+	_fail "space-fill operation did not reach ENOSPC (status $FILL_STATUS)"
+FILL_SIZE=$(_get_filesize "$TEST_FILE") ||
+	_fail "could not determine space-fill file size"
+[ "$FILL_SIZE" -gt 0 ] || _fail "space-fill operation wrote no data"
+
+if ALLOC_OUTPUT=$("$SU_PROG" -s /bin/bash -g "$FILL_GROUP" -G "$FILL_GROUP" \
+	"$qa_user" -c "$XFS_IO_PROG -c 'falloc 16M 4k' '$TEST_FILE'" 2>&1); then
+	_fail "ordinary user allocated from the reserved pool"
+fi
+printf '%s\n' "$ALLOC_OUTPUT" >>"$seqres".full
+printf '%s\n' "$ALLOC_OUTPUT" | grep -q "fallocate: No space left on device" ||
+	_fail "ordinary allocation failed for a reason other than ENOSPC"
+
+"$SU_PROG" -s /bin/bash -g "$RES_GROUP" -G "$RES_GROUP" "$qa_user" -c \
+	"$XFS_IO_PROG -c 'falloc 16M 4k' '$TEST_FILE'" \
+	>>"$seqres".full 2>&1 || _fail "reserved GID failed to allocate a block"
+
+_exit 0
