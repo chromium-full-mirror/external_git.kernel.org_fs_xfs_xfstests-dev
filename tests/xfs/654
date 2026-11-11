@@ -47,7 +47,7 @@ mon_nomount_refcount="$(_module_refcount xfs)"
 # Capture mod refcount after continuing healthmon (which should exit due to the
 # unmount) and killing it.
 kill -CONT $healer_pid
-kill $healer_pid
+kill $healer_pid &>> $seqres.full
 wait
 unset healer_pid
 nomon_nomount_refcount="$(_module_refcount xfs)"
