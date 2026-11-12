@@ -1,0 +1,57 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 Hengyu Liang.  All Rights Reserved.
+#
+# FS QA Test No. 683
+#
+# Make sure that statfs() does not report a negative or huge number of free
+# blocks when the free block counter drops below the blocks that are not
+# available for allocation.
+#
+# Move all free blocks into the reserve pool, then free many small extents.
+# The freed blocks refill the reserve pool first, so the free block counter
+# stays the same, while the free space btrees grow.
+#
+. ./common/preamble
+_begin_fstest auto quick
+
+_fixed_by_kernel_commit xxxxxxxxxxxx \
+	"xfs: fix f_bfree underflow in statfs()"
+
+_require_scratch
+_require_xfs_io_command "falloc"
+
+# Only the data device counters are checked.
+_disable_scratch_realtime
+
+_scratch_mkfs >> $seqres.full 2>&1
+_scratch_mount
+_require_xfs_scratch_non_zoned
+
+# A free space btree leaf holds about blksz / 8 records.  Deleting every
+# other file of blksz / 2 single-block files adds blksz / 4 records, which
+# takes a few more leaf blocks.
+blksz=$(_get_block_size $SCRATCH_MNT)
+nr_files=$((blksz / 2))
+_require_fs_space $SCRATCH_MNT $((nr_files * blksz * 2 / 1024))
+
+for ((i = 0; i < nr_files; i++)); do
+	$XFS_IO_PROG -f -c "falloc 0 $blksz" $SCRATCH_MNT/s$i
+done
+
+# Ask for more blocks than the filesystem has, so that the reserve pool takes
+# all free blocks and stays short of its target.
+nr_blocks=$(stat -f -c '%b' $SCRATCH_MNT)
+$XFS_IO_PROG -x -c "resblks $((nr_blocks * 2))" $SCRATCH_MNT >> $seqres.full
+
+find $SCRATCH_MNT -name 's*[13579]' -delete
+_scratch_sync
+
+# Before the fix, f_bfree and f_bavail were 2^64 minus a few blocks.  Some
+# versions of stat print that as a negative number.
+stat -f -c '%b %f %a' $SCRATCH_MNT | tee -a $seqres.full | $AWK_PROG '
+	$2 < 0 || $2 > $1 { print "f_bfree " $2 " out of range, f_blocks " $1 }
+	$3 < 0 || $3 > $1 { print "f_bavail " $3 " out of range, f_blocks " $1 }'
+
+echo "Silence is golden"
+_exit 0
