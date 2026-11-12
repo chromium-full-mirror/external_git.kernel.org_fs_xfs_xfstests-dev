@@ -46,6 +46,7 @@ int main(int argc, char *argv[])
 	struct linux_dirent64 *d;
 	struct stat st = {};
 	int bpos, total, i;
+	int ncalls = 0;
 	off_t lret;
 	int retval = EXIT_SUCCESS;
 	const char *filename = NULL;
@@ -96,6 +97,7 @@ int main(int argc, char *argv[])
 			perror("getdents");
 			exit(EXIT_FAILURE);
 		}
+		ncalls++;
 
 		if (modify && fd2 < 0 && total == 0) {
 			printf("getdents at offset 0 returned %d bytes\n", nread);
@@ -165,7 +167,18 @@ int main(int argc, char *argv[])
 					       (long long int)d->d_off);
 				if (!strcmp(filename, d->d_name)) {
 					found = 1;
-					if (st.st_ino && d->d_ino != st.st_ino) {
+					/*
+					 * The file is unlinked after the first
+					 * call. A filesystem may still return
+					 * the entry that did not fit in that
+					 * buffer first in the second call. In
+					 * an impure dir overlayfs lists such a
+					 * stale entry with the upper inode
+					 * number, not the st_ino seen before.
+					 * Skip the check for that one entry.
+					 */
+					if (st.st_ino && d->d_ino != st.st_ino &&
+					    (exists || bpos || ncalls != 2)) {
 						fprintf(stderr, "entry %s has inconsistent d_ino (%lld != %lld)\n",
 								filename,
 								(long long int)d->d_ino,
