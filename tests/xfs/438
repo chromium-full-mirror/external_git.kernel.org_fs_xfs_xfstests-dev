@@ -95,6 +95,9 @@ _require_flakey_with_error_writes
 _require_user
 _require_xfs_quota
 _require_freeze
+_require_test_sysfs_dev_attr error/fail_at_unmount
+_require_test_sysfs_dev_attr error/metadata/EIO/max_retries
+_require_test_sysfs_dev_attr error/metadata/EIO/retry_timeout_seconds
 
 echo "Silence is golden"
 
@@ -116,6 +119,12 @@ sysctl -w fs.xfs.xfssyncd_centisecs=100 >> $seqres.full 2>&1
 
 _qmount_option "usrquota"
 _scratch_mount
+
+# _scratch_mount turns off the retries of failed metadata writes.
+# Go back to the kernel defaults, so that the failed dquot buffer
+# write is retried from the AIL until unmount. fail_at_unmount
+# stays on, so the unmount ends the retries on a fixed kernel.
+_reset_xfs_sysfs_error_handling $SCRATCH_DEV >> $seqres.full
 
 # We need to set the quota limitation twice, and inject the write error
 # after the second setting. If we try to inject the write error after
@@ -144,6 +153,11 @@ _scratch_sync
 # wait for the push of the dquota log item in AIL and
 # the completion of the retried write of dquota buffer
 sleep 2
+
+# Run a stat to confirm we haven't shutdown prematurely. We expect the
+# fs to be running metadata write retries. A shutdown fs at this point
+# means that we haven't properly tested for the hang.
+stat $SCRATCH_MNT > /dev/null
 
 _scratch_unmount
 
