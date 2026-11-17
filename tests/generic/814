@@ -1,0 +1,92 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 Western Digital Corporation.  All Rights Reserved.
+#
+# FS QA Test No. 814
+#
+# On a zoned btrfs, btrfs_start_transaction() forces a transaction commit
+# when the delayed refs reservation exceeds its zoned cap. If the cap is
+# still exceeded after the commit, it returned -EAGAIN, which fsync passed
+# on to user space.
+#
+# Run parallel writers creating, overwriting and deleting small files with
+# an fsync after every write on a zoned device with a limited number of
+# active zones, and check that no fsync fails.
+#
+. ./common/preamble
+_begin_fstest auto quick zone
+
+_cleanup()
+{
+	cd /
+	[ -n "$pids" ] && kill $pids &> /dev/null
+	wait
+	rm -r -f $tmp.*
+}
+
+. ./common/zoned
+
+_fixed_by_fs_commit btrfs XXXXXXXXXXXX \
+	"btrfs: zoned: don't fail start_transaction() after a forced commit"
+
+_require_scratch_size $((4 * 1024 * 1024)) # kB
+
+if [ -b "$SCRATCH_RTDEV" ]; then
+	zoned_dev=$SCRATCH_RTDEV
+else
+	zoned_dev=$SCRATCH_DEV
+fi
+
+_require_zoned_device "$zoned_dev"
+_require_limited_active_zones "$zoned_dev"
+
+nr_writers=$((8 * LOAD_FACTOR))
+nr_files=250
+nr_rounds=$((4 * TIME_FACTOR))
+
+_scratch_mkfs >> $seqres.full 2>&1 || _fail "mkfs failed"
+_scratch_mount
+
+# Every other file is deleted per round to churn data and metadata.
+writer()
+{
+	local dir=$SCRATCH_MNT/w$1
+	local r i sz
+
+	mkdir -p $dir
+	for r in $(seq $nr_rounds); do
+		for i in $(seq $nr_files); do
+			# 4K - 256K
+			sz=$(( ((i + r + $1) % 64 + 1) * 4096 ))
+			$XFS_IO_PROG -f -c "pwrite -q -S $i -b 64k 0 $sz" \
+				-c fsync $dir/$i || return 1
+		done
+		for i in $(seq 1 2 $nr_files); do
+			rm -f $dir/$i
+		done
+	done
+}
+
+pids=""
+for w in $(seq $nr_writers); do
+	writer $w > $tmp.writer.$w 2>&1 &
+	pids="$pids $!"
+done
+
+ret=0
+for p in $pids; do
+	wait $p || ret=1
+done
+unset pids
+cat $tmp.writer.* >> $seqres.full
+[ $ret -eq 0 ] || echo "writer failed, see $seqres.full"
+
+find $SCRATCH_MNT -type f | sort | xargs md5sum > $tmp.md5.before
+_scratch_cycle_mount
+find $SCRATCH_MNT -type f | sort | xargs md5sum > $tmp.md5.after
+diff -q $tmp.md5.before $tmp.md5.after > /dev/null || echo "data mismatch"
+
+echo "Silence is golden"
+
+# success, all done
+_exit 0
