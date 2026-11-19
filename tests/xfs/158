@@ -8,7 +8,7 @@
 # everything works properly after the upgrade.
 
 . ./common/preamble
-_begin_fstest auto quick inobtcount
+_begin_fstest auto quick inobtcount admin
 
 # Import common functions.
 . ./common/filter

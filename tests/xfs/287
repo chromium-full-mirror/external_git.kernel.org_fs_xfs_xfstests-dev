@@ -8,7 +8,7 @@
 # xfs_db functionality
 #
 . ./common/preamble
-_begin_fstest auto dump quota quick
+_begin_fstest auto dump quota quick admin
 
 # Import common functions.
 . ./common/quota

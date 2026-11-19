@@ -8,7 +8,7 @@
 # counters.
 #
 . ./common/preamble
-_begin_fstest auto quick metadata
+_begin_fstest auto quick metadata admin
 
 # Import common functions.
 . ./common/filter
