@@ -1,0 +1,46 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (c) 2026 koraynilay.  All Rights Reserved.
+#
+# FS QA Test No. 815
+#
+# Based on generic/258, but tests timestamps prior to epoch with sub-second
+# precision.
+#
+# ksmbd, cifs, ntfs3 and other filesystem drivers violate timespec64
+# non-negative nanoseconds constraint, garbling output of stat.
+#
+. ./common/preamble
+_begin_fstest auto quick bigtime
+
+_fixed_by_fs_commit cifs 6a75ce0866bb \
+	"smb: client: fix negative timestamps being read from smb"
+_fixed_by_fs_commit cifs f2f961e0983c \
+	"ksmbd: fix negative timestamps being saved to disk"
+_fixed_by_fs_commit ntfs3 xxxxxxxxxxxx \
+	"ntfs3: fix negative timestamps corrupting stat output"
+
+_require_test
+_require_negative_timestamps
+
+TESTFILE=$TEST_DIR/timestamp-test.txt
+# we use 123456700 instead of 123456789 because some filesystems support
+# only 100ns precision
+DATE="1960-01-01 01:01:01.123456700 UTC"
+
+_cleanup()
+{
+	cd /
+	rm -rf $tmp.* "$TESTFILE"
+}
+
+# create a file with a timestamp prior to the epoch with nanosecond precision
+rm -f "$TESTFILE"
+touch -d "$DATE" "$TESTFILE"
+TZ=UTC stat -c "%y" "$TESTFILE"
+
+# unmount, remount, and check the timestamp
+_test_cycle_mount
+TZ=UTC stat -c "%y" "$TESTFILE"
+
+_exit 0
